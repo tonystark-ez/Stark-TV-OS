@@ -8,7 +8,8 @@ No root. Nothing uninstalled. One command (`./stark restore`) puts the TV back e
 
 [![Stark-TV-OS walkthrough: startup animation, home screen, Stark Control](docs/walkthrough.gif)](docs/walkthrough.mp4)
 
-*Recorded on the TV in real time, not sped up: a 2 GB TCL on Android TV 9. [MP4 version](docs/walkthrough.mp4).*
+*Recorded on the TV, a 2 GB TCL on Android TV 9. Only the startup animation is shown at 2x; everything after it is
+real time. [MP4 version](docs/walkthrough.mp4).*
 
 **[Download the APK](https://github.com/tonystark-ez/Stark-TV-OS/releases/latest)** · [Install](#install) ·
 [Build from source](#option-b-build-from-source)

@@ -25,20 +25,30 @@ adb connect "$TV" >/dev/null
 tv shell 'mkdir -p /data/local/tmp/stark_keys'
 tv push -q "$work"/up "$work"/left "$work"/right "$work"/down "$work"/ok "$work"/back /data/local/tmp/stark_keys/
 tv push -q tools/walkthrough.sh /data/local/tmp/stark_walk.sh
-tv shell sh /data/local/tmp/stark_walk.sh >/dev/null 2>&1 || true
-tv pull -q /sdcard/stark_walk.mp4 "$work/raw.mp4"
+rc=0
+tv shell 'sh /data/local/tmp/stark_walk.sh >/dev/null 2>&1; echo "rc=$?"' | grep -q '^rc=0' || rc=1
+tv pull -q /sdcard/stark_walk.mp4 "$work/raw.mp4" || rc=1
 tv shell 'rm -rf /sdcard/stark_walk.mp4 /data/local/tmp/stark_walk.sh /data/local/tmp/stark_keys'
+if [ $rc -ne 0 ]; then echo "The walkthrough went off script; docs/ left unchanged. Run it again."; exit 1; fi
 
 # Start 0.5 s after the startup animation's first black frame, just before its light sweep begins.
 black=$(ffmpeg -hide_banner -i "$work/raw.mp4" -vf "blackdetect=d=0.05:pix_th=0.06" -an -f null - 2>&1 |
   sed -n 's/.*black_start:\([0-9.]*\).*/\1/p' | head -1)
 start=$(awk -v b="${black:-0.6}" 'BEGIN { print b + 0.5 }')
-len=11.5
+
+# The startup animation plays at 2x; from the home screen on (its first scene change after 3 s) it's real time.
+speed=2
+cut=$(ffmpeg -hide_banner -ss "$start" -i "$work/raw.mp4" -vf "select='gt(t,3)*gt(scene,0.02)',showinfo" -an -f null - 2>&1 |
+  sed -n 's/.*pts_time:\([0-9.]*\).*/\1/p' | head -1)
+cut="${cut:-4.2}"
+len=11
 
 # screenrecord only writes a frame when the screen changes, so hold the last one for the still ending.
 mkdir -p docs
 ffmpeg -v error -y -ss "$start" -i "$work/raw.mp4" -t "$len" \
-  -vf "tpad=stop_mode=clone:stop_duration=4,fps=30,format=yuv420p" -c:v libx264 -preset slow -crf 18 -profile:v high -movflags +faststart -an \
+  -filter_complex "[0:v]tpad=stop_mode=clone:stop_duration=4,fps=30,split[a][b];
+    [a]trim=end=${cut},setpts=(PTS-STARTPTS)/${speed}[logo];[b]trim=start=${cut},setpts=PTS-STARTPTS[rest];
+    [logo][rest]concat=n=2:v=1:a=0,fps=30,format=yuv420p" -c:v libx264 -preset slow -crf 18 -profile:v high -movflags +faststart -an \
   docs/walkthrough.mp4
 ffmpeg -v error -y -i docs/walkthrough.mp4 \
   -vf "fps=15,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=192:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" \
