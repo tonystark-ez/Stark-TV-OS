@@ -1,0 +1,28 @@
+# Apps that `./stark debloat` turns off (pm disable-user, never uninstalled; `./stark restore` brings them back).
+# Only promo, demo, telemetry and dead apps. Anything a TV needs to work goes in protected.txt instead.
+# Verified on TCL BeyondTV (Android TV 9, Realtek RTD285O). Packages a TV doesn't have are skipped.
+
+# TCL
+com.tcl.bi                              # TCL "BI" analytics: usage telemetry sent to TCL
+com.tcl.messagebox                      # promo messages and pop-ups
+com.tcl.usercenter                      # TCL account (not needed for Google or any app)
+com.tcl.appmarket2                      # TCL app store (the Play Store stays)
+com.tcl.esticker                        # store-demo stickers
+com.tcl.showmode                        # store demo mode
+com.tcl.exhibit                         # store demo (newer models)
+com.tcl.hotelmenu                       # hotel mode menu
+com.tcl.notereminder                    # TCL notes and reminders pop-ups
+com.tcl.smartalexa                      # TCL's Alexa bridge (remove this line if you control the TV with Alexa)
+com.tcl.waterfall.overseas              # TCL Channel promo rows (newer models)
+com.tcl.channelplus                     # TCL Channel ad-supported live TV (newer models)
+com.tcl.repairguide                     # repair guide (newer models)
+com.tcl.ocean.instructions              # e-manual (newer models)
+com.tcl.logkit                          # log collection (newer models)
+
+# Google extras Stark-TV-OS replaces or that no longer work
+com.google.android.tvrecommendations    # feeds the stock home screen's rows; Stark doesn't use it
+com.google.android.leanbacklauncher.recommendations  # same, for the older launcher
+com.google.android.music                # Google Play Music, shut down in 2020
+com.google.android.play.games           # Play Games
+com.google.android.videos               # Play Movies & TV, discontinued; also runs preview services
+com.google.android.backdrop             # Ambient Mode screensaver (~45-120 MB, constant downloads); only once Stark Clock is the screensaver

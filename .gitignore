@@ -1,0 +1,10 @@
+out/
+*.apk
+*.idsig
+.stark/
+shots/
+*.keystore
+*.jks
+keystore.pass
+.DS_Store
+/stark_tv_os_boot.mp4

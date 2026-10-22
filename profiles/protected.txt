@@ -1,0 +1,51 @@
+# Never turned off by `./stark`, checked before every change. When in doubt, a package belongs here.
+
+# Android and Google services the Play Store, sign-in, casting and the remote depend on
+android
+com.android.vending                     # Play Store
+com.google.android.gms                  # Google Play services (sign-in, DRM provisioning)
+com.google.android.gsf                  # Google services framework
+com.google.android.apps.mediashell      # Chromecast built-in
+com.google.android.tv.remote.service    # phone remote / Google TV app pairing
+com.google.android.tungsten.setupwraith # first setup: it saved a Wi-Fi network, disabling it would erase that network
+com.google.android.inputmethod.latin    # on-screen keyboard
+com.google.android.webview
+com.google.android.tvlauncher           # stock home: kept so `./stark restore` and the fallback always work
+com.android.tv.settings
+com.android.systemui
+com.android.bluetooth
+com.android.providers.tv
+
+# TCL system pieces: picture, sound, inputs, tuner, remote, keys, setup, updates
+com.tcl.tv                              # live TV and the inputs
+com.tcl.tvinput
+com.tcl.tvpassthrough                   # HDMI / AV inputs
+com.tcl.sourcemananger                  # input switching
+com.tcl.keycustomfunctionservice        # remote's special keys, fallback home
+com.tcl.keyhelp
+com.tcl.tcl_bt_rcu_service              # Bluetooth remote
+com.tcl.autopair                        # remote pairing
+com.tcl.micmanager                      # remote microphone
+com.tcl.settings
+com.tcl.systemuioverlay
+com.tcl.framework.custom
+com.tcl.xian.StartandroidService
+com.tcl.common.terminalmanagerplus
+com.tcl.partnercustomizer
+com.tcl.partnercustomizer.resource
+com.tcl.initsetup
+com.tcl.useragreement
+com.tcl.factory.view
+com.tcl.inputmethod.international
+com.tcl.android.webview
+com.tcl.UpdatePeripheral
+com.tcl.rc.ota                          # remote firmware updates
+com.tcl.versionUpdateApp                # TV firmware updates
+com.tcl.dashboard
+com.tcl.guard
+com.tcl.tvweishi
+com.tcl.miracast                        # Miracast screen mirroring receiver
+com.tcl.MultiScreenInteraction_TV       # T-Cast mirroring
+com.tcl.airplay2                        # AirPlay on newer models
+com.realtek.netflix.setting
+com.dolby.android.audio.service

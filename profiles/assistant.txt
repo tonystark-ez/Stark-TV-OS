@@ -1,0 +1,6 @@
+# Turned off only with `./stark debloat --assistant`.
+# On the BeyondTV these keep ~80 MB of RAM and ~20% of a CPU core busy listening, even when idle.
+# Trade-off: the remote's microphone button and voice search stop working.
+com.google.android.katniss              # Google Assistant / voice search
+com.google.android.tv.assistant         # Assistant settings and hotword
+com.google.android.speech.pumpkin       # offline speech recognition for the Assistant

@@ -1,0 +1,422 @@
+#!/usr/bin/env bash
+# stark: install, tune, clean and restore Stark-TV-OS on an Android TV, from your computer, over ADB.
+# Every change is reversible with `./stark restore`. Nothing is ever uninstalled from the TV.
+set -uo pipefail
+cd "$(dirname "$0")" || exit 1
+
+PKG=io.github.starktvos
+HOME_ACT="$PKG/.HomeActivity"
+DREAM="$PKG/.ClockDream"
+APK=StarkTV.apk
+STATE=.stark/state
+umask 077
+mkdir -p "$STATE"
+chmod 700 .stark 2>/dev/null || true
+
+c_cyan=$'\033[36m'; c_green=$'\033[32m'; c_yellow=$'\033[33m'; c_red=$'\033[31m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
+say()  { printf '%s>%s %s\n' "$c_cyan" "$c_off" "$*"; }
+ok()   { printf '%sok%s %s\n' "$c_green" "$c_off" "$*"; }
+warn() { printf '%s!%s %s\n' "$c_yellow" "$c_off" "$*"; }
+die()  { printf '%sx%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
+ask()  { local a; read -r -p "$1 [y/N] " a; [[ "$a" =~ ^[Yy] ]]; }
+
+usage() {
+  cat <<EOF
+Stark-TV-OS: a fast, minimal home for Android TVs.
+
+  ./stark doctor               check the tools on this computer
+  ./stark build                build StarkTV.apk
+  ./stark connect <ip>         connect to the TV (remembers the IP)
+  ./stark scan                 read the TV: model, memory, what's slowing it down (changes nothing)
+  ./stark install              install Stark, make it the home screen, then offer tune + debloat
+  ./stark tune                 faster animations, Stark Clock screensaver instead of Ambient Mode
+  ./stark debloat [--dry-run] [--assistant]
+                               turn off TCL promo/telemetry apps (--assistant: also voice search)
+  ./stark clean                clear all app caches and close background apps
+  ./stark status               what Stark changed and how the TV is doing
+  ./stark home                 make Stark the home screen again
+  ./stark restore              put everything back the way it was
+  ./stark lock                 turn off ADB debugging on the TV (do this when you're done)
+  ./stark shot                 screenshot of the TV into shots/
+  ./stark logs                 follow Stark's log
+  ./stark validate [--static]  run the test suite (static checks, then on-TV tests)
+  ./stark uninstall            restore, then remove Stark
+
+The TV's IP comes from: an <ip> argument, \$STARK_TV, or the last ./stark connect.
+EOF
+}
+
+# ---------- connection ----------
+
+# Everything that reaches the TV's shell is checked against these first: values read back from the TV or from
+# .stark/ are data, never commands.
+RE_TARGET='^[A-Za-z0-9]([A-Za-z0-9.-]{0,252})(:[0-9]{1,5})?$'
+RE_PKG='^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$'
+RE_COMPONENT='^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+/[A-Za-z0-9_.$]+$'
+valid_pkg() { [[ "$1" =~ $RE_PKG ]]; }
+valid_component() { [[ "$1" =~ $RE_COMPONENT ]]; }
+# Single-quotes a value for the remote shell (adb shell joins its arguments into one command line).
+q() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+
+SERIAL=""
+resolve_target() {
+  local ip="${1:-${STARK_TV:-}}"
+  [ -z "$ip" ] && [ -f .stark/tv ] && ip=$(head -1 .stark/tv)
+  [ -z "$ip" ] && die "Which TV? Run ./stark connect <ip> first (TV: Settings > Network > IP address)."
+  [[ "$ip" =~ $RE_TARGET ]] || die "Not an IP address or host name: $ip"
+  [[ "$ip" == *:* ]] || ip="$ip:5555"
+  SERIAL="$ip"
+}
+
+connect() {
+  resolve_target "${1:-}"
+  command -v adb >/dev/null || die "adb not found. Run ./stark doctor"
+  local state
+  state=$(adb -s "$SERIAL" get-state 2>/dev/null || true)
+  if [ "$state" != "device" ]; then
+    adb connect "$SERIAL" >/dev/null 2>&1 || true
+    local i
+    for i in $(seq 1 30); do
+      state=$(adb -s "$SERIAL" get-state 2>/dev/null || true)
+      [ "$state" = "device" ] && break
+      if [ "$i" = 2 ]; then
+        if adb devices | grep -q "^$SERIAL.*unauthorized"; then
+          warn "On the TV: accept 'Allow USB debugging?' and tick 'Always allow from this computer'."
+        fi
+      fi
+      sleep 2
+    done
+  fi
+  if [ "$state" != "device" ]; then
+    warn "Can't reach $SERIAL. Check:"
+    echo "   - the TV is on and on the same Wi-Fi as this computer"
+    echo "   - Settings > Device Preferences > Developer options > USB debugging is on"
+    echo "   - macOS: System Settings > Privacy & Security > Local Network allows your terminal app"
+    echo "     (or run: adb kill-server; adb nodaemon server &)"
+    exit 1
+  fi
+  echo "${SERIAL%:5555}" > .stark/tv
+}
+
+# stdin from /dev/null: adb would otherwise swallow the answers meant for our prompts.
+tv()   { adb -s "$SERIAL" "$@" </dev/null; }
+tvsh() { adb -s "$SERIAL" shell "$@" </dev/null 2>/dev/null | tr -d '\r'; }
+state_file() { echo "$STATE/$(echo "$SERIAL" | tr ':/' '__')"; }
+
+# ---------- package lists ----------
+
+list_of() { grep -vE '^[[:space:]]*(#|$)' "$1" | awk '{print $1}' | grep -E "$RE_PKG"; }
+enabled_pkgs() { tvsh pm list packages -e | sed 's/^package://' | grep -E "$RE_PKG"; }
+# Packages ./stark turned off, as recorded in the state file.
+recorded_disabled() { grep '^disabled=' "$(state_file)" 2>/dev/null | cut -d= -f2 | grep -E "$RE_PKG"; }
+record_disabled() { grep -qxF "disabled=$1" "$(state_file)" || echo "disabled=$1" >> "$(state_file)"; }
+
+is_protected() {
+  local p="$1"
+  list_of profiles/protected.txt | grep -qxF "$p" && return 0
+  case "$p" in
+    *bluetooth*|*inputmethod*|*setupwraith*|*initsetup*|com.android.providers.*|*systemui*|*keyboard*) return 0 ;;
+    *mediashell*|*miracast*|*MultiScreen*|*airplay*|*webview*|*.ota|*.ota.*) return 0 ;;
+  esac
+  return 1
+}
+
+# Android erases the Wi-Fi networks an app saved when that app is turned off.
+wifi_owners() { tvsh dumpsys wifi | grep -oE 'cname=[A-Za-z0-9_.]+' | cut -d= -f2 | sort -u; }
+
+send_state() {
+  local disabled saver
+  disabled=$(recorded_disabled | paste -sd, -)
+  saver=$(saved orig_screensaver)
+  valid_component "$saver" || saver=""
+  tvsh am broadcast -a "$PKG.STATE" -n "$PKG/.StateReceiver" --es disabled "$(q "${disabled:-}")" \
+    --es orig_screensaver "$(q "$saver")" >/dev/null
+}
+
+saved() { grep "^$1=" "$(state_file)" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\n\r'; }
+save_once() {
+  local v; v=$(printf '%s' "$2" | tr -d '\n\r')
+  grep -q "^$1=" "$(state_file)" 2>/dev/null || echo "$1=$v" >> "$(state_file)"
+}
+
+# ---------- commands ----------
+
+cmd_doctor() {
+  local bad=0
+  if java -version >/dev/null 2>&1 || [ -x /opt/homebrew/opt/openjdk@17/bin/java ]; then ok "JDK"; else warn "JDK 17 missing: brew install openjdk@17"; bad=1; fi
+  if command -v adb >/dev/null; then ok "adb $(adb version | head -1 | awk '{print $5}')"; else warn "adb missing: brew install --cask android-platform-tools"; bad=1; fi
+  local sdk=""
+  for d in "${ANDROID_HOME:-}" /opt/homebrew/share/android-commandlinetools "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do
+    [ -n "$d" ] && [ -d "$d/build-tools" ] && sdk="$d" && break
+  done
+  if [ -n "$sdk" ] && ls "$sdk"/platforms/android-34/android.jar >/dev/null 2>&1; then ok "Android SDK $sdk"
+  else
+    warn "Android SDK missing:"
+    echo "   brew install --cask android-commandlinetools"
+    echo "   sdkmanager --sdk_root=/opt/homebrew/share/android-commandlinetools \"build-tools;34.0.0\" \"platforms;android-34\""
+    bad=1
+  fi
+  return $bad
+}
+
+cmd_build() { ./build.sh; }
+
+needs_build() {
+  [ ! -f "$APK" ] && return 0
+  [ -n "$(find app VERSION -newer "$APK" -type f 2>/dev/null | head -1)" ]
+}
+
+cmd_scan() {
+  connect "${1:-}"
+  local dir
+  dir=".stark/devices/$(echo "$SERIAL" | tr ':/' '__')"
+  mkdir -p "$dir"
+  say "Reading the TV (nothing is changed)..."
+  tvsh getprop > "$dir/getprop.txt"
+  tvsh pm list packages -s -e | sed 's/^package://' | sort > "$dir/system-enabled.txt"
+  tvsh pm list packages -d | sed 's/^package://' | sort > "$dir/disabled.txt"
+  tvsh pm list packages -3 | sed 's/^package://' | sort > "$dir/user-apps.txt"
+  tvsh dumpsys meminfo > "$dir/meminfo.txt"
+
+  prop() { grep "^\[$1\]" "$dir/getprop.txt" | sed 's/.*\]: \[\(.*\)\]/\1/'; }
+  local mem_total mem_avail
+  mem_total=$(tvsh cat /proc/meminfo | awk '/MemTotal/{printf "%d", $2/1024}')
+  mem_avail=$(tvsh cat /proc/meminfo | awk '/MemAvailable/{printf "%d", $2/1024}')
+  echo
+  echo "  TV        $(prop ro.product.brand) $(prop ro.product.model)  ($(prop ro.board.platform))"
+  echo "  Android   $(prop ro.build.version.release) (API $(prop ro.build.version.sdk)), security patch $(prop ro.build.version.security_patch)"
+  echo "  Memory    ${mem_avail} MB free of ${mem_total} MB"
+  echo "  Display   $(tvsh wm size | awk '{print $3}')  density $(tvsh wm density | awk '{print $3}')"
+  echo "  Storage   $(tvsh df -h /data | tail -1 | awk '{print $4" free of "$2}')"
+  echo "  Home      $(tvsh cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME | tail -1)"
+  echo "  Saver     $(tvsh settings get secure screensaver_components)"
+  echo
+  echo "  Biggest memory users:"
+  sed -n '/Total PSS by process/,/^$/p' "$dir/meminfo.txt" | sed -n '2,9p' | sed 's/^/   /'
+  echo
+  local enabled; enabled=$(enabled_pkgs)
+  echo "  Promo / telemetry apps found (./stark debloat turns these off):"
+  local p found=0
+  for p in $(list_of profiles/debloat.txt); do
+    if echo "$enabled" | grep -qxF "$p"; then echo "   - $p  $c_dim$(grep -F "$p " profiles/debloat.txt | sed 's/.*# //')$c_off"; found=1; fi
+  done
+  [ $found = 0 ] && echo "   none"
+  echo
+  echo "  Saved raw data in $dir/"
+}
+
+cmd_install() {
+  connect "${1:-}"
+  if needs_build; then say "Building..."; ./build.sh || die "Build failed"; fi
+  say "Installing $APK..."
+  tv install -r "$APK" | tail -1
+  tvsh pm path "$PKG" | grep -q package: || die "Install failed"
+
+  say "Granting Stark the settings it manages (secure DNS, animations, screensaver)..."
+  tvsh pm grant "$PKG" android.permission.WRITE_SECURE_SETTINGS
+  tvsh appops set "$PKG" GET_USAGE_STATS allow
+  # TCL firmware blocks background work for new apps unless allowed (name varies by firmware).
+  tvsh "appops set $PKG AUTO_START allow 2>/dev/null || appops set $PKG APP_AUTO_START allow 2>/dev/null" >/dev/null || true
+
+  local sf; sf=$(state_file); touch "$sf"
+  save_once orig_home "$(tvsh cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME | tail -1)"
+  save_once orig_screensaver "$(tvsh settings get secure screensaver_components)"
+  save_once orig_anim "$(tvsh settings get global window_animation_scale)"
+
+  cmd_home_quiet && ok "Stark-TV-OS is the home screen. Press Home on the remote."
+  send_state
+
+  echo
+  ask "Apply speed tweaks (snappier animations, light Stark Clock screensaver instead of Ambient Mode)?" && cmd_tune_quiet
+  echo
+  if ask "Turn off TCL promo, demo and telemetry apps (reversible with ./stark restore)?"; then
+    cmd_debloat_quiet ""
+  fi
+  echo
+  ok "Done. Open 'Stark Control' (Quick actions > Control) on the TV for cleaning, network and mirroring."
+  warn "Security: when you've finished setting up, run ./stark lock (turns off ADB on the TV)."
+}
+
+resolve_home() { tvsh cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME | tail -1; }
+
+# Stock launchers declare a higher HOME priority than any installed app may have, and Android picks the highest
+# priority without looking at the preferred home. So a stock launcher that still wins is turned off (recorded,
+# `./stark restore` turns it back on), together with its recommendations service, which crashes without it.
+cmd_home_quiet() {
+  local sf; sf=$(state_file); touch "$sf"
+  local now stock tries=0
+  tvsh cmd package set-home-activity "$HOME_ACT" >/dev/null
+  tvsh cmd role add-role-holder android.app.role.HOME "$PKG" >/dev/null 2>&1 || true
+  now=$(resolve_home)
+  while [[ "$now" != "$PKG"* && "$now" == */* && $tries -lt 3 ]]; do
+    stock="${now%%/*}"
+    valid_pkg "$stock" || { warn "Unexpected home component: $now"; return 1; }
+    if is_protected "$stock" && [ "$stock" != com.google.android.tvlauncher ]; then
+      warn "Home resolves to $stock, which Stark won't turn off."; return 1
+    fi
+    say "The TV's launcher ($stock) outranks other home screens: turning it off (./stark restore brings it back)."
+    tvsh pm disable-user --user 0 "$stock" >/dev/null
+    record_disabled "$stock"
+    if [ "$stock" = com.google.android.tvlauncher ] && enabled_pkgs | grep -qxF com.google.android.tvrecommendations; then
+      tvsh pm disable-user --user 0 com.google.android.tvrecommendations >/dev/null
+      record_disabled com.google.android.tvrecommendations
+    fi
+    tvsh cmd package set-home-activity "$HOME_ACT" >/dev/null
+    now=$(resolve_home)
+    tries=$((tries + 1))
+  done
+  case "$now" in
+    "$PKG"*) tvsh am start -a android.intent.action.MAIN -c android.intent.category.HOME >/dev/null; return 0 ;;
+    *) warn "The TV still resolves Home to $now"; return 1 ;;
+  esac
+}
+cmd_home() { connect "${1:-}"; cmd_home_quiet && ok "Home screen: Stark-TV-OS"; send_state; }
+
+cmd_tune_quiet() {
+  local s
+  for s in window_animation_scale transition_animation_scale animator_duration_scale; do
+    tvsh settings put global "$s" 0.5
+  done
+  ok "Animations: 0.5x (menus feel twice as fast)"
+  tvsh settings put secure screensaver_components "$DREAM"
+  tvsh settings put secure screensaver_enabled 1
+  ok "Screensaver: Stark Clock (no downloads, moves to protect the panel)"
+}
+cmd_tune() { connect "${1:-}"; local sf; sf=$(state_file); touch "$sf"
+  save_once orig_screensaver "$(tvsh settings get secure screensaver_components)"
+  save_once orig_anim "$(tvsh settings get global window_animation_scale)"
+  cmd_tune_quiet; }
+
+cmd_debloat_quiet() {
+  local flags="$1" dry=0 lists="profiles/debloat.txt"
+  [[ "$flags" == *--dry-run* ]] && dry=1
+  [[ "$flags" == *--assistant* ]] && lists="$lists profiles/assistant.txt"
+  local enabled owners saver; enabled=$(enabled_pkgs); owners=$(wifi_owners)
+  saver=$(tvsh settings get secure screensaver_components)
+  local sf; sf=$(state_file); touch "$sf"
+  local p count=0
+  for p in $(for l in $lists; do list_of "$l"; done); do
+    echo "$enabled" | grep -qxF "$p" || continue
+    if is_protected "$p"; then warn "skip $p (protected)"; continue; fi
+    if echo "$owners" | grep -qxF "$p"; then warn "skip $p (it saved a Wi-Fi network)"; continue; fi
+    if [ "$p" = com.google.android.backdrop ] && [[ "$saver" == com.google.android.backdrop* ]]; then
+      warn "skip $p (still the screensaver; run ./stark tune first)"; continue
+    fi
+    if [ $dry = 1 ]; then echo "  would turn off $p"; count=$((count+1)); continue; fi
+    if tvsh pm disable-user --user 0 "$p" | grep -q "disabled-user"; then
+      record_disabled "$p"
+      echo "  off  $p"; count=$((count+1))
+    else
+      warn "couldn't turn off $p"
+    fi
+  done
+  if [ $dry = 1 ]; then ok "$count apps would be turned off (dry run, nothing changed)"; return; fi
+  send_state
+  ok "$count apps turned off. ./stark restore brings them back."
+}
+cmd_debloat() {
+  local flags="" ip=""
+  for a in "$@"; do case "$a" in --*) flags="$flags $a" ;; *) ip="$a" ;; esac; done
+  connect "$ip"; cmd_debloat_quiet "$flags"
+}
+
+cmd_clean() {
+  connect "${1:-}"
+  local before after
+  before=$(tvsh df /data | tail -1 | awk '{print $4}')
+  local mem_before; mem_before=$(tvsh cat /proc/meminfo | awk '/MemAvailable/{print int($2/1024)}')
+  tvsh pm trim-caches 999G
+  tvsh am kill-all
+  sleep 2
+  after=$(tvsh df /data | tail -1 | awk '{print $4}')
+  local mem_after; mem_after=$(tvsh cat /proc/meminfo | awk '/MemAvailable/{print int($2/1024)}')
+  ok "Storage free: $before -> $after"
+  ok "Memory free:  ${mem_before} MB -> ${mem_after} MB"
+}
+
+cmd_status() {
+  connect "${1:-}"
+  local sf; sf=$(state_file)
+  echo "  Home        $(tvsh cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME | tail -1)"
+  echo "  Screensaver $(tvsh settings get secure screensaver_components)"
+  echo "  Animations  $(tvsh settings get global window_animation_scale)"
+  echo "  Private DNS $(tvsh settings get global private_dns_mode) $(tvsh settings get global private_dns_specifier)"
+  echo "  ADB         $( [ "$(tvsh settings get global adb_enabled)" = 1 ] && echo "on (run ./stark lock when done)" || echo off)"
+  echo "  Turned off  $(grep -c '^disabled=' "$sf" 2>/dev/null || echo 0) apps"
+  echo "  Memory      $(tvsh cat /proc/meminfo | awk '/MemAvailable/{print int($2/1024)" MB free"}')"
+  echo "  Stark       $(tvsh dumpsys package $PKG | grep -m1 versionName | awk -F= '{print $2}')  using $(tvsh dumpsys meminfo $PKG | awk '/TOTAL PSS|TOTAL:/{print int($2/1024)" MB"; exit}')"
+}
+
+cmd_restore() {
+  connect "${1:-}"
+  local sf; sf=$(state_file)
+  say "Restoring the TV..."
+  local p failed=0
+  for p in $(recorded_disabled); do
+    if tvsh pm enable "$p" | grep -q "new state: enabled"; then echo "  on   $p"
+    else warn "couldn't turn $p back on"; failed=1; fi
+  done
+  [ $failed = 0 ] && { sed -i.bak '/^disabled=/d' "$sf" 2>/dev/null; rm -f "$sf.bak"; }
+
+  local home; home=$(saved orig_home)
+  valid_component "$home" || home="com.google.android.tvlauncher/.MainActivity"
+  case "$home" in "$PKG"*) home="com.google.android.tvlauncher/.MainActivity" ;; esac
+  tvsh cmd package set-home-activity "$(q "$home")" >/dev/null
+  tvsh pm clear-preferred-activities "$PKG" >/dev/null 2>&1 || true
+  ok "Home screen: $home"
+
+  local saver; saver=$(saved orig_screensaver)
+  if valid_component "$saver"; then tvsh settings put secure screensaver_components "$(q "$saver")"
+  else tvsh settings delete secure screensaver_components >/dev/null; fi
+  local anim; anim=$(saved orig_anim)
+  [[ "$anim" =~ ^[0-9]+(\.[0-9]+)?$ ]] || anim=1.0
+  local s; for s in window_animation_scale transition_animation_scale animator_duration_scale; do tvsh settings put global "$s" "$anim"; done
+  ok "Screensaver and animations restored"
+  send_state 2>/dev/null || true
+  tvsh am start -a android.intent.action.MAIN -c android.intent.category.HOME >/dev/null
+  ok "Back to the original TV. ./stark home switches to Stark again."
+}
+
+cmd_lock() {
+  connect "${1:-}"
+  warn "This turns off ADB on the TV. To use ./stark again, turn on USB debugging in Developer options."
+  ask "Turn off ADB now?" || exit 0
+  tvsh settings put global adb_enabled 0
+  ok "ADB is off. The TV no longer accepts debugging connections."
+}
+
+cmd_shot() {
+  connect "${1:-}"; mkdir -p shots
+  local f
+  f="shots/$(date +%Y%m%d-%H%M%S).png"
+  tv exec-out screencap -p > "$f" && ok "$f"
+}
+
+cmd_logs() { connect "${1:-}"; tv logcat -s StarkTV:V AndroidRuntime:E; }
+
+cmd_uninstall() {
+  cmd_restore "${1:-}"
+  tv uninstall "$PKG" | tail -1
+  ok "Stark-TV-OS removed"
+}
+
+case "${1:-}" in
+  doctor) cmd_doctor ;;
+  build) cmd_build ;;
+  connect) connect "${2:-}"; ok "Connected to $SERIAL" ;;
+  scan) cmd_scan "${2:-}" ;;
+  install) cmd_install "${2:-}" ;;
+  tune) cmd_tune "${2:-}" ;;
+  debloat) shift; cmd_debloat "$@" ;;
+  clean) cmd_clean "${2:-}" ;;
+  status) cmd_status "${2:-}" ;;
+  home) cmd_home "${2:-}" ;;
+  restore) cmd_restore "${2:-}" ;;
+  lock) cmd_lock "${2:-}" ;;
+  shot) cmd_shot "${2:-}" ;;
+  logs) cmd_logs "${2:-}" ;;
+  uninstall) cmd_uninstall "${2:-}" ;;
+  validate) shift; exec tests/validate.sh "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *) usage; exit 1 ;;
+esac
