@@ -53,11 +53,11 @@ public final class CenterActivity extends Activity implements PanelView.Host {
         setContentView(view);
         getWindow().setBackgroundDrawable(null);
         view.requestFocus();
-        if (!Prefs.safeMode(this)) loadArt();
         stack.push(new Entry("main"));
         String start = getIntent().getStringExtra(EXTRA_PAGE);
         if (start != null) stack.push(new Entry(start));
         show();
+        if (!Prefs.safeMode(this)) loadArt();
     }
 
     @Override
@@ -82,7 +82,8 @@ public final class CenterActivity extends Activity implements PanelView.Host {
             view.setArt(artRing, artRadial);
             return;
         }
-        Bg.quick(() -> {
+        // Not on Bg.quick: rendering the ring takes long enough to hold up the first page behind it.
+        Bg.run(() -> {
             final Bitmap ring = Art.ring(640);
             final Bitmap radial = Art.radialGlow(256);
             Bg.ui(() -> {
@@ -231,7 +232,7 @@ public final class CenterActivity extends Activity implements PanelView.Host {
                 .color(ns.type == NetTools.NONE ? Theme.BAD : Theme.DIM));
         p.add(new PanelView.Item(Glyphs.CAST, "Screen mirroring", SystemTools.deviceName(this),
                 "Show your phone or laptop on the TV: Chromecast, Miracast and AirPlay.", () -> open("mirror")));
-        int issues = securityIssues();
+        int issues = securityIssues(ns);
         p.add(new PanelView.Item(Glyphs.SHIELD, "Security & privacy", issues == 0 ? "Good" : issues + " to review",
                 "Debugging access, encrypted DNS, updates, apps from outside the Play Store.", () -> open("security"))
                 .color(issues == 0 ? Theme.GOOD : Theme.WARN));
@@ -438,10 +439,9 @@ public final class CenterActivity extends Activity implements PanelView.Host {
         return p;
     }
 
-    private int securityIssues() {
+    private int securityIssues(NetTools.Status s) {
         int n = 0;
         if (SystemTools.adbEnabled(this)) n++;
-        NetTools.Status s = NetTools.status(this);
         if (!s.privateDns && Build.VERSION.SDK_INT >= 28) n++;
         if (!SystemTools.sideloaded(this).isEmpty()) n++;
         return n;

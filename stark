@@ -29,6 +29,7 @@ Stark-TV-OS: a fast, minimal home for Android TVs.
   ./stark connect <ip>         connect to the TV (remembers the IP)
   ./stark scan                 read the TV: model, memory, what's slowing it down (changes nothing)
   ./stark install              install Stark, make it the home screen, then offer tune + debloat
+  ./stark install --apk FILE   same, with a downloaded release APK (needs only adb, no build tools)
   ./stark tune                 faster animations, Stark Clock screensaver instead of Ambient Mode
   ./stark debloat [--dry-run] [--assistant]
                                turn off TCL promo/telemetry apps (--assistant: also voice search)
@@ -206,10 +207,22 @@ cmd_scan() {
 }
 
 cmd_install() {
-  connect "${1:-}"
-  if needs_build; then say "Building..."; ./build.sh || die "Build failed"; fi
-  say "Installing $APK..."
-  tv install -r "$APK" | tail -1
+  local apk="" ip=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --apk) apk="${2:-}"; [ -n "$apk" ] || die "--apk needs a file"; shift 2 ;;
+      *) ip="$1"; shift ;;
+    esac
+  done
+  connect "$ip"
+  if [ -n "$apk" ]; then
+    [ -f "$apk" ] || die "No such file: $apk"
+  else
+    apk="$APK"
+    if needs_build; then say "Building..."; ./build.sh || die "Build failed"; fi
+  fi
+  say "Installing $apk..."
+  tv install -r "$apk" | tail -1
   tvsh pm path "$PKG" | grep -q package: || die "Install failed"
 
   say "Granting Stark the settings it manages (secure DNS, animations, screensaver)..."
@@ -405,7 +418,7 @@ case "${1:-}" in
   build) cmd_build ;;
   connect) connect "${2:-}"; ok "Connected to $SERIAL" ;;
   scan) cmd_scan "${2:-}" ;;
-  install) cmd_install "${2:-}" ;;
+  install) shift; cmd_install "$@" ;;
   tune) cmd_tune "${2:-}" ;;
   debloat) shift; cmd_debloat "$@" ;;
   clean) cmd_clean "${2:-}" ;;

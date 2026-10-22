@@ -6,7 +6,12 @@ security, while keeping the Play Store, Google sign-in, Chromecast and every str
 
 No root. Nothing uninstalled. One command (`./stark restore`) puts the TV back exactly as it was.
 
-![Home](docs/home.png)
+[![Stark-TV-OS walkthrough: startup animation, home screen, Stark Control](docs/walkthrough.gif)](docs/walkthrough.mp4)
+
+*Recorded on the TV in real time, not sped up: a 2 GB TCL on Android TV 9. [MP4 version](docs/walkthrough.mp4).*
+
+**[Download the APK](https://github.com/tonystark-ez/Stark-TV-OS/releases/latest)** · [Install](#install) ·
+[Build from source](#option-b-build-from-source)
 
 ## The look
 
@@ -15,6 +20,8 @@ sit large at the top, the clock lives inside the eclipse ring, and a soft light 
 whatever you're on (red for YouTube, blue for Prime Video). The Stark-TV-OS animation plays when the TV turns on.
 
 Every glow is rendered **once** into a bitmap on a background thread, so the look costs nothing per frame.
+
+![Home](docs/home.png)
 
 | Startup | Stark Control |
 |---|---|
@@ -30,7 +37,7 @@ Measured on a TCL BeyondTV (Android TV 9, Realtek RTD285O, 4x Cortex-A55, 2 GB R
 | 90th percentile frame time | 89 ms | 11-15 ms |
 | Home screen memory | 98 MB | 25 MB |
 | Free system memory | ~560 MB | ~685 MB |
-| APK size | | ~280 KB (incl. font and startup animation) |
+| APK size | | ~270 KB (incl. font and startup animation) |
 
 How:
 
@@ -86,25 +93,94 @@ everything that slows it down.
 
 ## Install
 
-You need the TV and a computer on the same Wi-Fi.
+Two ways in. **Option A** installs the ready-made APK from GitHub Releases and needs only `adb`. **Option B**
+builds it from the source, for when you want to change something first.
 
-1. **On the TV**: Settings > Device Preferences > About > click *Build* 7 times. Then Developer options >
-   *USB debugging* on. Note the TV's IP (Settings > Network).
-2. **Tools on a Mac** (`./stark doctor` checks them):
+Either way, start on the TV: Settings > Device Preferences > About > click *Build* 7 times, then Developer options >
+*USB debugging* on. Note the TV's IP address (Settings > Network). Your computer must be on the same Wi-Fi.
+
+### Option A: install the release APK
+
+1. **Get adb**: `brew install --cask android-platform-tools` (macOS), `sudo apt install adb` (Debian/Ubuntu) or
+   `winget install Google.PlatformTools` (Windows).
+2. **Download** `StarkTV.apk` and *Source code (zip)* from the
+   [latest release](https://github.com/tonystark-ez/Stark-TV-OS/releases/latest), and unzip the source.
+3. **Check the download** (optional, recommended). The SHA-256 must match the one in the release notes. If you
+   have Android build-tools, the signer must be `CN=Stark-TV-OS` with certificate SHA-256
+   `6cc128888741ce25c620fc487f8ac92fff6a61ea0b9528dced4caa507a54a11f`:
+
+   ```bash
+   shasum -a 256 StarkTV.apk
+   apksigner verify --print-certs StarkTV.apk
+   ```
+
+4. **Install** from the unzipped folder (macOS, Linux, or WSL/Git Bash on Windows). This is the same guided setup
+   as building from source, without any build tools:
+
+   ```bash
+   ./stark connect 192.168.1.20                  # accept "Allow USB debugging?" on the TV, tick Always allow
+   ./stark install --apk ~/Downloads/StarkTV.apk # installs, makes it home, offers tune + debloat
+   ./stark lock                                  # when done: turns ADB off on the TV
+   ```
+
+<details>
+<summary>Prefer plain adb commands, without the script?</summary>
+
+```bash
+adb connect 192.168.1.20:5555
+adb install -r StarkTV.apk
+adb shell pm grant io.github.starktvos android.permission.WRITE_SECURE_SETTINGS   # encrypted DNS, animations, screensaver
+adb shell appops set io.github.starktvos GET_USAGE_STATS allow                    # cache sizes
+adb shell cmd package set-home-activity io.github.starktvos/.HomeActivity
+```
+
+If Home still opens the TV's own launcher, it outranks other home screens; turn it off (and its recommendations
+service, which crashes without it):
+
+```bash
+adb shell pm disable-user --user 0 com.google.android.tvlauncher
+adb shell pm disable-user --user 0 com.google.android.tvrecommendations
+```
+
+To undo: `adb shell pm enable` both of them, then `adb uninstall io.github.starktvos`. Finish with
+`adb shell settings put global adb_enabled 0` to turn debugging off. The script does all of this, records it, and
+skips the debloat and tune steps unless you say yes.
+</details>
+
+Without a computer you can still sideload the APK (USB stick and a file manager) and open Stark from the app list,
+but Android TV won't let an app make itself the home screen or grant the settings permission without adb.
+
+### Option B: build from source
+
+1. **Tools** (`./stark doctor` checks them). On macOS:
 
    ```bash
    brew install openjdk@17 && brew install --cask android-commandlinetools android-platform-tools
    sdkmanager --sdk_root=/opt/homebrew/share/android-commandlinetools "build-tools;34.0.0" "platforms;android-34"
    ```
 
-3. **Install**:
+   On Linux: JDK 17, the Android command-line tools and `adb`, then the same `sdkmanager` line with your SDK
+   path (set `ANDROID_HOME` to it).
+
+2. **Clone, change, build, install**:
 
    ```bash
-   ./stark connect 192.168.1.6     # accept "Allow USB debugging?" on the TV, tick Always allow
+   git clone https://github.com/tonystark-ez/Stark-TV-OS.git && cd Stark-TV-OS
+   # edit app/src/io/github/starktvos/*.java, profiles/*.txt, ...
+   ./build.sh                      # StarkTV.apk; the first build creates your own signing key in .stark/
+   ./stark connect 192.168.1.20
    ./stark scan                    # read-only: model, memory, what's slowing it down
-   ./stark install                 # builds, installs, makes it home, offers tune + debloat
-   ./stark lock                    # when done: turns ADB off on the TV
+   ./stark install                 # rebuilds if the source changed, installs, makes it home, offers tune + debloat
+   ./stark validate                # static and on-TV test suite, before you share a build
+   ./stark lock
    ```
+
+Your build is signed with your own key, so Android won't install it over the release APK (or the other way
+round). Run `./stark uninstall` first; favourites are reset. Keep `.stark/` safe: every update you ship must be
+signed with the same key.
+
+To re-render the media: `python3 tools/render_boot.py` (startup animation; numpy, Pillow, ffmpeg) and
+`tools/record_walkthrough.sh <tv-ip>` (this README's walkthrough, recorded on the TV).
 
 On macOS, if `adb connect` says *No route to host* while the TV is on, allow your terminal under System Settings >
 Privacy & Security > Local Network.
@@ -114,7 +190,7 @@ Privacy & Security > Local Network.
 | Command | What it does |
 |---|---|
 | `./stark scan` | Specs, memory hogs, promo apps found. Changes nothing. |
-| `./stark install` | Install, grant the settings Stark manages, make it home, offer tune and debloat |
+| `./stark install [--apk FILE]` | Install (a release APK, or build from source), grant the settings Stark manages, make it home, offer tune and debloat |
 | `./stark tune` | Animations 0.5x, Stark Clock screensaver |
 | `./stark debloat [--dry-run] [--assistant]` | Turn off promo/telemetry apps (`--assistant`: also voice search, saves ~80 MB and constant CPU) |
 | `./stark clean` | Trim every app cache, close background apps |
@@ -177,6 +253,7 @@ Run `./stark scan`, then edit `profiles/debloat.txt` (promo, demo and telemetry 
 | `app/src/.../Art.java`, `Theme.java` | Pre-rendered eclipse ring and glows, the STARK wordmark, colours and type |
 | `app/src/.../SplashView.java` | Startup animation (`app/res/raw/stark_boot.mp4`) |
 | `tools/render_boot.py` | Renders the startup animation |
+| `tools/record_walkthrough.sh`, `walkthrough.sh` | Records the README walkthrough on the TV |
 | `app/src/.../StarkApp.java` | Font loading, crash counter for safe mode |
 | `app/src/.../CenterActivity.java`, `PanelView.java` | Stark Control |
 | `app/src/.../SystemTools.java`, `NetTools.java` | Memory, caches, settings; network, speed test, DNS |
